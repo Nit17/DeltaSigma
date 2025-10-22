@@ -4,7 +4,7 @@
 Includes:
 - containers_quick_reference: brief descriptions
 - container_examples: small sanity examples
-- BIG_O_NOTES: cheat sheet
+- BIG_O_NOTES: cheat sheet (see Day1/THEORY.md for deeper theory: asymptotics, internals, and trade-offs)
 - bench_container_ops: micro-benchmarks for membership and insert patterns
 """
 

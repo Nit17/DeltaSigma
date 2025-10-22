@@ -7,6 +7,17 @@ This directory splits content into focused, runnable modules:
 - `03-two-sum.py` — Three solutions (O(n^2), O(n), O(n log n)) + a small benchmark helper.
 - `04-ml-memory.py` — Practical patterns for memory-efficient ML preprocessing (optional deps guarded).
 
+## Theory (in-depth notes)
+
+See `THEORY.md` for detailed explanations:
+
+- Asymptotic notation and analysis styles (worst/average/best, amortized, space)
+- Python containers internals and complexity trade-offs
+- Sorting in Python (Timsort stability, when to use heap vs sort)
+- `collections` essentials and heap theory
+- Two Sum algorithmic trade-offs and constraints
+- Memory and data layout for numpy/pandas; sparse formats; memmap; practical strategies
+
 ## How to run
 
 From the project root (or the `Day1` folder):

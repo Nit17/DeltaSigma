@@ -2,6 +2,8 @@
 04-ml-memory: Efficient preprocessing & memory control patterns for ML pipelines.
 
 All heavy dependencies are optional; functions raise ImportError if missing.
+See Day1/THEORY.md §7 for deeper notes on numpy views vs copies, pandas dtypes,
+sparse formats (CSR/CSC/COO), memmap, and general memory strategies.
 """
 
 from __future__ import annotations

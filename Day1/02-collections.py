@@ -1,5 +1,8 @@
 """
 02-collections: Counter, defaultdict, deque, namedtuple, OrderedDict, and heapq basics.
+
+See Day1/THEORY.md for deeper notes on when to use each, algorithmic complexities,
+and how heaps compare to full sorts for top-k selection.
 """
 
 from __future__ import annotations

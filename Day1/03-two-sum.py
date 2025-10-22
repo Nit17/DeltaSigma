@@ -6,6 +6,9 @@ Functions:
 - two_sum_hash: O(n) average
 - two_sum_two_pointers: O(n log n) on sorted copy
 
+Theory: See Day1/THEORY.md §6 for trade-offs (time/space, duplicates, index retention,
+and when to prefer sorting vs hashing under memory constraints).
+
 Run this file to see quick correctness checks and a small benchmark.
 """
 
