@@ -18,6 +18,10 @@ See `THEORY.md` for detailed explanations:
 - Two Sum algorithmic trade-offs and constraints
 - Memory and data layout for numpy/pandas; sparse formats; memmap; practical strategies
 
+## Exercises
+
+See `EXERCISES.md` for short practice tasks per section (containers, collections/deque, Two Sum variants, ML memory).
+
 ## How to run
 
 From the project root (or the `Day1` folder):

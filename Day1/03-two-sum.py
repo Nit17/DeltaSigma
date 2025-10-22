@@ -53,6 +53,55 @@ def two_sum_two_pointers(nums: Sequence[int], target: int) -> Optional[Tuple[int
     return None
 
 
+def two_sum_all_pairs(nums: Sequence[int], target: int) -> List[Tuple[int, int]]:
+    """Return all unique index pairs (i, j), i < j, such that nums[i] + nums[j] == target.
+
+    Strategy:
+    - Build value -> list of indices
+    - For each unique value v, let c = target - v
+      - If v < c: cross product of indices[v] x indices[c]
+      - If v == c: all index combinations within indices[v]
+    Returns pairs sorted lexicographically.
+    Complexity: O(n + a) where a is number of output pairs.
+    """
+    from collections import defaultdict
+
+    idxs: Dict[int, List[int]] = defaultdict(list)
+    for i, v in enumerate(nums):
+        idxs[v].append(i)
+
+    pairs: List[Tuple[int, int]] = []
+    seen_vals = set()
+    for v in list(idxs.keys()):
+        if v in seen_vals:
+            continue
+        c = target - v
+        if c not in idxs:
+            seen_vals.add(v)
+            continue
+        if v < c:
+            for i in idxs[v]:
+                for j in idxs[c]:
+                    pairs.append((i, j) if i < j else (j, i))
+            # processed both v and c
+            seen_vals.add(v)
+            seen_vals.add(c)
+        elif v == c:
+            lst = idxs[v]
+            m = len(lst)
+            for a in range(m):
+                for b in range(a + 1, m):
+                    i, j = lst[a], lst[b]
+                    pairs.append((i, j))
+            seen_vals.add(v)
+        else:
+            # v > c: defer processing to when we encounter c (the smaller value)
+            seen_vals.add(v)
+
+    pairs = sorted(set(pairs))
+    return pairs
+
+
 def bench_two_sum(sizes: List[int] = [1000, 5000], reps: int = 2) -> List[Dict[str, float]]:
     """Return a list of timing dicts for each input size.
 
@@ -105,3 +154,13 @@ if __name__ == "__main__":
     for r in rows:
         n = int(r["n"])  # type: ignore
         print(f"  n={n:5d} | brute={r['bruteforce_s']:.6f} | hash={r['hash_s']:.6f} | 2ptr={r['two_pointers_s']:.6f}")
+
+    # exercise: all pairs
+    ex_nums = [1, 3, 2, 2, 4, 0, 3]
+    ex_pairs = two_sum_all_pairs(ex_nums, 4)
+    expected_pairs = {(0, 1), (0, 6), (2, 3), (4, 5)}
+    print("All-pairs exercise result:", ex_pairs)
+    if set(ex_pairs) == expected_pairs:
+        print("All-pairs exercise: PASS")
+    else:
+        print("All-pairs exercise: CHECK manually — expected", sorted(expected_pairs))
