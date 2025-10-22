@@ -22,6 +22,17 @@ See `THEORY.md` for detailed explanations:
 
 See `EXERCISES.md` for short practice tasks per section (containers, collections/deque, Two Sum variants, ML memory).
 
+## Solutions
+
+Runnable, commented solutions for all exercises live under `Day1/solutions`:
+
+- `solutions/01-containers-exercises.py`
+- `solutions/02-collections-exercises.py`
+- `solutions/03-two-sum-exercises.py`
+- `solutions/04-ml-memory-exercises.py` (optional deps: pandas/numpy/scipy)
+
+Run any of them directly to see small asserts and example outputs.
+
 ## How to run
 
 From the project root (or the `Day1` folder):
