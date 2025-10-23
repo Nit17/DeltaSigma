@@ -13,7 +13,6 @@ required package is missing. The __main__ section tries small demos if available
 from __future__ import annotations
 from typing import Dict, Optional
 
-
 def downcasting_report(df) -> Dict[str, float]:
     """Return memory before/after downcasting and savings.
 
