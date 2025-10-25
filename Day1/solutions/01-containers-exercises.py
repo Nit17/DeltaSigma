@@ -12,7 +12,6 @@ from __future__ import annotations
 from typing import Iterable, List
 import bisect
 
-
 def stable_dedupe(seq: Iterable[int]) -> List[int]:
     """Order-preserving dedupe using a seen set.
 
