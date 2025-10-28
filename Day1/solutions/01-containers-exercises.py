@@ -7,7 +7,6 @@ Includes commented solutions for:
 3) Maintain sorted list under inserts (bisect)
 4) Flatten one level of nesting
 """
-
 from __future__ import annotations
 from typing import Iterable, List
 import bisect
