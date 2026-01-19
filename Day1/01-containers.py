@@ -1,7 +1,6 @@
 """
 01-containers: Python containers and Big-O quick reference + tiny benchmarks.
 
-
 Includes:
 - containers_quick_reference: brief descriptions
 - container_examples: small sanity examples
