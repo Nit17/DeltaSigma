@@ -11,8 +11,8 @@ through a regime-switching market simulator, deep hedging, ML signal research an
 a reinforcement-learning market-maker, with the validation discipline needed to
 take a model from research into production.
 
-> **Status:** Phase 1 (pricing, vol surface, market simulator) and Phase 2 (deep hedging)
-> are complete and tested. Later phases are listed in the [roadmap](#roadmap).
+> **Status:** Phases 1–3 (pricing and vol surface, deep hedging, vol signal research on
+> real EURUSD data) are complete and tested. Later phases are listed in the [roadmap](#roadmap).
 
 ---
 
@@ -106,9 +106,84 @@ Reproduce with `python examples/03_deep_hedging.py` (~8 min on a laptop CPU, fix
 
 ---
 
+## Phase 3: Vol signal research on real EURUSD data
+
+Phase 3 forecasts EURUSD 1-month realised volatility and tests whether the forecasts
+improve a **variance-risk-premium (VRP)** strategy that sells 1M vol. It uses real data
+from Nov 2007 to Mar 2025:
+- EURUSD spot from FRED (DEXUSEU)
+- the CBOE EuroCurrency volatility index (EVZ)
+
+The out-of-sample period is **Nov 2011 to Feb 2025**: 3,286 days, covering the
+euro-crisis aftermath, COVID and the 2022 rates shock.
+
+**Research hygiene.** Overfitting and leakage are the usual way results like these go
+wrong, so each one has a dedicated safeguard:
+
+| Risk | Control |
+|---|---|
+| Look-ahead in features | An automated **prefix audit**: every feature is recomputed on truncated history and must match. It catches centred windows and full-sample scaling (both tested). **0 violations.** |
+| Overlapping 21-day labels | **Purged** expanding walk-forward (López de Prado). Training labels never reach into the test block. Refit every 6 months, 27 folds. |
+| Hyper-parameter snooping | Gradient boosting is tuned by **nested purged K-fold with an embargo**, inside each training window only. |
+| Regime look-ahead | The HMM regime probability is **filtered, not smoothed**, and refit on an expanding window at fixed dates (audited). |
+| "Better" by chance | Diebold-Mariano tests on QLIKE with a HAC variance for overlapping forecasts and the HLN small-sample correction. |
+| Backtest cherry-picking | The trading threshold is fixed ex ante (2x the half-spread), Sharpe is averaged over all 21 roll offsets, and **all six strategy variants tried are reported**. |
+
+![Vol research](docs/images/vol_research.png)
+
+Forecast accuracy, out of sample (full tables in
+[docs/vol_research_results.md](docs/vol_research_results.md)):
+
+| Model | QLIKE (all) | R² vs HAR-RV | QLIKE (stress regime) | DM p-value vs HAR (stress) |
+|---|---:|---:|---:|---:|
+| Random walk (trailing 1M RV) | 0.201 | -11% | 0.162 | worse |
+| HAR-RV (Corsi 2009) | 0.158 | — | 0.141 | — |
+| Implied vol (EVZ) | 0.142 | -8% | 0.101 | **0.002** |
+| **HAR-RV-IV** | **0.142** | **+20%** | 0.119 | 0.21 |
+| Gradient boosting (nested CV) | 0.160 | +3% | 0.131 | 0.67 |
+| GRU + linear highway | 0.148 | +8% | **0.105** | **0.020** |
+
+**What the results show:**
+- **Implied vol is the strongest single predictor.** Adding it to HAR gives the best
+  overall model (+20% out-of-sample R², DM p = 0.06).
+  - The market's own forecast is hard to beat with price history alone.
+- **Non-linear ML adds little on ~3,000 noisy, overlapping daily labels.**
+  - Gradient boosting does no better than linear HAR.
+  - The GRU is competitive overall and is the only learned model that is
+    **significantly better than HAR in the stress regime** (p = 0.02).
+  - That fits Phase 2: model value is concentrated in the regimes where simple models
+    break down.
+- **Better forecasts are not a better strategy.** Selling vol every day earns about
+  +0.74 vol pts per trade (Sharpe 1.34 after 0.25 vol pt costs). Every
+  forecast-based variant has a Sharpe of 1.16–1.34, so none improves on it:
+
+| VRP strategy (21-day vol swaps) | Active % | Sharpe | Max drawdown (vol pts) | Avg worst 5% trades |
+|---|---:|---:|---:|---:|
+| Always short vol | 100 | **1.34** | 9.3 | -3.69 |
+| HAR-RV-IV timed | 98 | 1.34 | 9.3 | -3.68 |
+| GRU timed | 64 | 1.16 | **7.2** | **-3.52** |
+| Gradient boosting timed | 68 | 1.19 | 8.9 | -3.53 |
+| Vol-managed (1/vol) | 100 | 1.27 | 12.2 | -4.27 |
+| VRP/vol sized | 100 | 1.19 | 11.0 | -4.04 |
+
+  - The predicted premium is positive almost every day, so timing has little to act on.
+  - The forecasts do help with **risk**: GRU timing cuts the maximum drawdown by 23% and
+    trades a third less, while keeping 87% of the Sharpe.
+  - Vol-managed sizing, which helps in equities, makes EURUSD short-vol *worse*: it adds
+    risk in quiet markets right before vol spikes.
+
+The VRP backtest treats the 30-day EVZ index as a tradable vol-swap strike with a fixed
+half-spread and no convexity adjustment, so read it as a signal study, not a P&L
+estimate.
+
+Reproduce with `python examples/04_vol_research.py` (~4 min; downloads and caches the
+FRED data). `--synthetic --quick` runs the same pipeline offline on simulated data.
+
+---
+
 ## Validation
 
-There are 109 tests at ~97% line coverage, and they run in CI on Python 3.10, 3.12 and 3.13.
+There are 131 tests at ~96% line coverage, and they run in CI on Python 3.10, 3.12 and 3.13.
 
 - Put-call parity, zero-vol limits, and **every Greek checked against finite differences**
 - Delta to strike round trips for all four delta conventions, calls and puts, 10D and 25D
@@ -120,6 +195,10 @@ There are 109 tests at ~97% line coverage, and they run in CI on Python 3.10, 3.
 - The forward and variance-swap prices are martingales; the variance swap settles exactly on realised variance
 - The cost-free delta hedge replicates the Black-Scholes price, and hedging error shrinks like `1/sqrt(n)` with more frequent rebalancing
 - The untrained residual policy equals Black delta; the **PyTorch loss matches the NumPy P&L engine**; training is deterministic and beats delta hedging out of sample
+- The leakage audit flags deliberately leaky features (centred windows, full-sample z-scores) and passes the real pipeline
+- Purged walk-forward and K-fold never let a training label overlap the test labels, and the embargo is enforced
+- The HMM recovers the regime vols, its filter is prefix-invariant, and it tracks the latent vol level on simulated data
+- On synthetic data where implied vol is the true expected vol, HAR-RV-IV beats HAR-RV with a significant DM statistic; QLIKE is minimised at the truth
 
 ---
 
@@ -129,12 +208,13 @@ There are 109 tests at ~97% line coverage, and they run in CI on Python 3.10, 3.
 git clone https://github.com/Nit17/DeltaSigma.git
 cd DeltaSigma
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
-pip install torch --index-url https://download.pytorch.org/whl/cpu   # for deep hedging
+pip install -e ".[dev]"          # includes pandas + scikit-learn for research
+pip install torch --index-url https://download.pytorch.org/whl/cpu   # deep hedging, GRU
 pytest
 python examples/01_vol_surface.py
 python examples/02_regime_simulation.py
 python examples/03_deep_hedging.py
+python examples/04_vol_research.py
 ```
 
 ```python
@@ -174,11 +254,20 @@ src/deltasigma/
 ├── sim/
 │   ├── heston.py             # Fourier pricer, QE variance + log-spot steps
 │   └── regime.py             # Markov regime-switching Heston simulator
-└── hedging/
-    ├── market.py             # hedge instruments, exact regime-aware variance swap
-    ├── pnl.py                # transaction costs, terminal P&L, CVaR metrics
-    ├── strategies.py         # Black delta, delta-vega, Whalley-Wilmott benchmarks
-    └── deep.py               # PyTorch deep hedger (residual policy, CVaR training)
+├── hedging/
+│   ├── market.py             # hedge instruments, exact regime-aware variance swap
+│   ├── pnl.py                # transaction costs, terminal P&L, CVaR metrics
+│   ├── strategies.py         # Black delta, delta-vega, Whalley-Wilmott benchmarks
+│   └── deep.py               # PyTorch deep hedger (residual policy, CVaR training)
+└── research/
+    ├── data.py               # FRED loader (cached) + synthetic twin with known truth
+    ├── features.py           # causal HAR / implied-vol features, forward RV target
+    ├── leakage.py            # automated look-ahead audit
+    ├── cv.py                 # purged walk-forward, purged K-fold with embargo
+    ├── regime.py             # Gaussian HMM, causal filtered regime probability
+    ├── models.py             # HAR-RV(-IV), gradient boosting (nested CV), GRU
+    ├── evaluation.py         # walk-forward driver, QLIKE, Diebold-Mariano
+    └── backtest.py           # VRP vol-swap backtest, offset-averaged statistics
 tests/                        # pytest suite
 examples/                     # runnable scripts that produce the figures above
 ```
@@ -189,16 +278,21 @@ examples/                     # runnable scripts that produce the figures above
 
 - [x] **Phase 1: Pricing and volatility foundations.** FX conventions, SABR / Vanna-Volga smiles, broker-strangle calibration, arbitrage checks, regime-switching Heston simulator.
 - [x] **Phase 2: Deep hedging.** A PyTorch CVaR hedging policy with transaction costs, benchmarked against Black delta, Whalley-Wilmott and delta-vega hedging in calm and stress regimes.
-- [ ] **Phase 3: Vol signal research.** Forecasting the vol surface and the realised-vs-implied vol premium (HAR-RV, gradient boosting, sequence models) with walk-forward evaluation, purged / embargoed CV, leakage checks and regime detection.
+- [x] **Phase 3: Vol signal research.** Real EURUSD realised-vol forecasting (HAR-RV, HAR-RV-IV, gradient boosting, GRU) with leakage audits, purged walk-forward and nested CV, HMM regime detection, Diebold-Mariano tests and a VRP backtest.
 - [ ] **Phase 4: RL market-making.** An FX options RFQ simulator with client flow and a win-probability model; a PPO quoting agent with Greek inventory limits, compared against an Avellaneda-Stoikov-style baseline.
 - [ ] **Phase 5: Production.** Greek-based PnL attribution, model drift monitoring (catching failures like the forwards-only hedger's stress-regime breakdown), regime-randomised retraining, a backtest report and a pricing / quoting service.
 
 ## Data
 
-FX implied-vol data is not freely available, so the research core runs on a
-**calibrated synthetic market** (the regime-switching simulator), and later phases
-add free historical FX spot data where it is needed. The sample EURUSD quotes are
-illustrative and are not live market data.
+- **Phases 1–2:** a calibrated synthetic market (the regime-switching simulator). The
+  sample EURUSD smile quotes are illustrative, not live market data.
+- **Phase 3: real public data.**
+  - EURUSD spot: Federal Reserve H.10 via FRED `DEXUSEU`.
+  - 30-day implied vol: CBOE EuroCurrency ETF Volatility Index via FRED `EVZCLS`,
+    discontinued in 2025.
+  - The files are downloaded on first run and cached in `data/raw/`. That folder is
+    git-ignored, so the data is not redistributed.
+  - Tests and CI use a synthetic twin with known ground truth.
 
 ## References
 
@@ -211,6 +305,13 @@ illustrative and are not live market data.
 - Buehler, H. et al. (2019). *Deep Hedging.* Quantitative Finance.
 - Whalley, A. E. & Wilmott, P. (1997). *An Asymptotic Analysis of an Optimal Hedging Model for Option Pricing with Transaction Costs.* Mathematical Finance.
 - Rockafellar, R. T. & Uryasev, S. (2000). *Optimization of Conditional Value-at-Risk.* Journal of Risk.
+- Corsi, F. (2009). *A Simple Approximate Long-Memory Model of Realized Volatility.* Journal of Financial Econometrics.
+- Patton, A. (2011). *Volatility Forecast Comparison Using Imperfect Volatility Proxies.* Journal of Econometrics.
+- Diebold, F. & Mariano, R. (1995). *Comparing Predictive Accuracy.*; Harvey, D., Leybourne, S. & Newbold, P. (1997).
+- López de Prado, M. (2018). *Advances in Financial Machine Learning.* Wiley (purging, embargo).
+- Hamilton, J. (1989). *A New Approach to the Economic Analysis of Nonstationary Time Series and the Business Cycle.* Econometrica.
+- Lai, G. et al. (2018). *Modeling Long- and Short-Term Temporal Patterns with Deep Neural Networks (LSTNet).* SIGIR.
+- Moreira, A. & Muir, T. (2017). *Volatility-Managed Portfolios.* Journal of Finance.
 
 ## Author
 

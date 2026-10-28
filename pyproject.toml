@@ -23,7 +23,15 @@ dependencies = [
 [project.optional-dependencies]
 viz = ["matplotlib>=3.7"]
 ml = ["torch>=2.2"]
-dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.5", "matplotlib>=3.7"]
+research = ["pandas>=2.0", "scikit-learn>=1.3"]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.5",
+    "matplotlib>=3.7",
+    "pandas>=2.0",
+    "scikit-learn>=1.3",
+]
 
 [project.urls]
 Repository = "https://github.com/Nit17/DeltaSigma"
