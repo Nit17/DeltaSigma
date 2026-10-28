@@ -33,3 +33,4 @@ jobs:
           python examples/02_regime_simulation.py
           python examples/03_deep_hedging.py --quick
           python examples/04_vol_research.py --synthetic --quick
+          python examples/05_rl_market_making.py --quick

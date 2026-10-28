@@ -11,8 +11,8 @@ through a regime-switching market simulator, deep hedging, ML signal research an
 a reinforcement-learning market-maker, with the validation discipline needed to
 take a model from research into production.
 
-> **Status:** Phases 1–3 (pricing and vol surface, deep hedging, vol signal research on
-> real EURUSD data) are complete and tested. Later phases are listed in the [roadmap](#roadmap).
+> **Status:** Phases 1–4 (pricing and vol surface, deep hedging, vol signal research on
+> real EURUSD data, RL market-making) are complete and tested. Later phases are listed in the [roadmap](#roadmap).
 
 ---
 
@@ -181,9 +181,81 @@ FRED data). `--synthetic --quick` runs the same pipeline offline on simulated da
 
 ---
 
+## Phase 4: RL market-making for FX options RFQs
+
+Phase 4 is a dealer quoting EURUSD ATM vol to clients through RFQs (requests for quote). Each simulated day has 200 RFQs. The simulator
+([`deltasigma.mm.env`](src/deltasigma/mm/env.py)) includes:
+- **Market:** regime-switching ATM vol with vol jumps (event risk), and interbank hedging
+  with a cost that doubles in stress.
+- **Client tiers:** real-money clients are price-insensitive. **Fast-money clients are
+  price-sensitive and partly informed**: half the time their side matches the next
+  30-step vol move. That creates real adverse selection, and a recent-flow signal that
+  predicts vol moves (correlation 0.44).
+- **Paired evaluation:** every policy faces identical days (common random numbers), so
+  comparisons are paired. **4,000 test days** per scenario.
+
+**Approach**
+1. **Win-probability model:** a logistic model fitted to an RFQ log with randomised
+   quotes. Because the simulator knows the true acceptance curve, calibration can be
+   checked against ground truth: mean |p̂ − p| = 0.009, AUC 0.90, and its Brier score is
+   within 0.0003 of the true-probability Brier score.
+2. **Classical quoters, all tuned on separate training seeds:** each quotes
+   `argmax_δ (δ − cost)·P(win | δ)`, where `cost` adds expected adverse selection and an
+   Avellaneda-Stoikov / Guéant-style inventory term, with band hedging interbank.
+   - B1: fixed spread with band hedging.
+   - B2: the win-model-optimal quote with inventory skew, ignoring adverse selection.
+   - B3: B2 plus the full measured 30-step markout.
+   - B4: a *tuned fraction* of the markout plus the informed-flow signal.
+3. **PPO from scratch in PyTorch.** The agent is a **residual** on B4 and adjusts both
+   the quote and the hedge. A zero action reproduces B4 exactly (tested). It is trained on
+   the same mean-variance objective (P&L minus a running inventory penalty), and
+   checkpoints are selected on separate validation days.
+4. **Deployment gate:** PPO replaces the classical quoter only if it beats it on
+   validation days.
+
+![RL market making](docs/images/rl_market_making.png)
+
+Risk-adjusted P&L per day, out of sample (vol pts × vega units). Paired t-stats are vs
+B4; full tables in [docs/rl_market_making_results.md](docs/rl_market_making_results.md):
+
+| Strategy | Normal days | Stress-start days | Avg \|inventory\| (normal) | Hedge cost (normal) |
+|---|---:|---:|---:|---:|
+| B1 Fixed spread + band hedge | 12.69 | 2.62 | 1.94 | 12.76 |
+| B2 Win-model optimal + inventory skew | 19.82 | 12.03 | 1.92 | 5.57 |
+| B3 B2 + full 30-step markout | 18.06 | 11.75 | 1.83 | 4.51 |
+| **B4 + tuned markout fraction & flow signal** | **20.76** | 13.17 | 2.16 | 1.68 |
+| PPO residual on B4 | 20.59 (−0.8%, t = −2.7) | **14.74 (+11.9%, t = 19)** | 1.83 | 6.02 |
+
+**What the results show:**
+- **Use the estimated model.** B2 beats the fixed spread (B1) by 56% on normal days and
+  by 4.6x in stress.
+- **Pricing in the full measured adverse selection is a mistake.**
+  - B3 charges informed clients the full 30-step markout (0.18 vol pts) and loses 8.9%
+    against B2.
+  - The dealer hedges long before 30 steps have passed, so its real exposure is a fraction
+    of the markout. Tuning picked **25%**.
+  - With that fraction plus the informed-flow signal, B4 is the best classical quoter.
+  - Lesson: the markout horizon has to match the actual holding period.
+- **RL is not a free lunch against a well-tuned model.** PPO did *not* find more
+  quoting edge: its quote adjustment has zero slope on the flow signal B4 already prices
+  in. What it learned is a **more conservative inventory policy**: about 15–20% less
+  inventory, more interbank hedging, and lower P&L volatility.
+  - In stress, that policy earns **+12% (t = 19)**.
+  - On normal days it is slightly worse, and the **validation gate correctly rejects it**
+    for normal-market deployment.
+  - The natural next step is **regime-conditional deployment**: switch to the RL policy
+    when the Phase 3 HMM signals stress. That is planned for Phase 5.
+- **Disclosure:** the PPO training budget was revised once, from 200 updates with
+  init log-std −1.2 to 300 updates with −1.6. The first run scored −0.66 (t = −11) on
+  normal days and +0.88 (t = +11) in stress. All other settings were fixed in advance.
+
+Reproduce with `python examples/05_rl_market_making.py` (~10 min on a laptop CPU, fixed seeds).
+
+---
+
 ## Validation
 
-There are 131 tests at ~96% line coverage, and they run in CI on Python 3.10, 3.12 and 3.13.
+There are 143 tests at ~97% line coverage, and they run in CI on Python 3.10, 3.12 and 3.13.
 
 - Put-call parity, zero-vol limits, and **every Greek checked against finite differences**
 - Delta to strike round trips for all four delta conventions, calls and puts, 10D and 25D
@@ -199,6 +271,8 @@ There are 131 tests at ~96% line coverage, and they run in CI on Python 3.10, 3.
 - Purged walk-forward and K-fold never let a training label overlap the test labels, and the embargo is enforced
 - The HMM recovers the regime vols, its filter is prefix-invariant, and it tracks the latent vol level on simulated data
 - On synthetic data where implied vol is the true expected vol, HAR-RV-IV beats HAR-RV with a significant DM statistic; QLIKE is minimised at the truth
+- The RFQ simulator's P&L identity holds exactly (spread + MTM − hedge costs), books are flat at the close, fill frequencies match the true win probability, and informed clients always trade in the direction of the future vol move
+- The win model is calibrated to ground truth; the grid-optimal quote satisfies the profit trade-off; inventory skew moves quotes in the right direction; the PPO residual starts exactly at its base quoter
 
 ---
 
@@ -215,6 +289,7 @@ python examples/01_vol_surface.py
 python examples/02_regime_simulation.py
 python examples/03_deep_hedging.py
 python examples/04_vol_research.py
+python examples/05_rl_market_making.py
 ```
 
 ```python
@@ -268,6 +343,11 @@ src/deltasigma/
     ├── models.py             # HAR-RV(-IV), gradient boosting (nested CV), GRU
     ├── evaluation.py         # walk-forward driver, QLIKE, Diebold-Mariano
     └── backtest.py           # VRP vol-swap backtest, offset-averaged statistics
+└── mm/
+    ├── env.py                # vectorised RFQ market: regimes, jumps, informed clients
+    ├── winprob.py            # win-probability model, calibration, markout estimation
+    ├── policies.py           # fixed / model-optimal / AS-skew quoters, tuning, evaluation
+    └── ppo.py                # PPO residual market-maker (PyTorch, from scratch)
 tests/                        # pytest suite
 examples/                     # runnable scripts that produce the figures above
 ```
@@ -279,8 +359,8 @@ examples/                     # runnable scripts that produce the figures above
 - [x] **Phase 1: Pricing and volatility foundations.** FX conventions, SABR / Vanna-Volga smiles, broker-strangle calibration, arbitrage checks, regime-switching Heston simulator.
 - [x] **Phase 2: Deep hedging.** A PyTorch CVaR hedging policy with transaction costs, benchmarked against Black delta, Whalley-Wilmott and delta-vega hedging in calm and stress regimes.
 - [x] **Phase 3: Vol signal research.** Real EURUSD realised-vol forecasting (HAR-RV, HAR-RV-IV, gradient boosting, GRU) with leakage audits, purged walk-forward and nested CV, HMM regime detection, Diebold-Mariano tests and a VRP backtest.
-- [ ] **Phase 4: RL market-making.** An FX options RFQ simulator with client flow and a win-probability model; a PPO quoting agent with Greek inventory limits, compared against an Avellaneda-Stoikov-style baseline.
-- [ ] **Phase 5: Production.** Greek-based PnL attribution, model drift monitoring (catching failures like the forwards-only hedger's stress-regime breakdown), regime-randomised retraining, a backtest report and a pricing / quoting service.
+- [x] **Phase 4: RL market-making.** An FX options RFQ simulator with informed client flow; a calibrated win-probability model; tuned Avellaneda-Stoikov-style quoters; a PPO residual agent with a validation deployment gate.
+- [ ] **Phase 5: Production.** Greek-based PnL attribution, model drift monitoring (catching failures like the forwards-only hedger's stress-regime breakdown), regime-conditional policy switching (HMM-gated RL quoter), regime-randomised retraining, a backtest report and a pricing / quoting service.
 
 ## Data
 
@@ -293,6 +373,8 @@ examples/                     # runnable scripts that produce the figures above
   - The files are downloaded on first run and cached in `data/raw/`. That folder is
     git-ignored, so the data is not redistributed.
   - Tests and CI use a synthetic twin with known ground truth.
+- **Phase 4:** a synthetic RFQ market. Its parameters (win curves, informed share,
+  hedging costs) are illustrative, not estimated from proprietary client data.
 
 ## References
 
@@ -312,6 +394,10 @@ examples/                     # runnable scripts that produce the figures above
 - Hamilton, J. (1989). *A New Approach to the Economic Analysis of Nonstationary Time Series and the Business Cycle.* Econometrica.
 - Lai, G. et al. (2018). *Modeling Long- and Short-Term Temporal Patterns with Deep Neural Networks (LSTNet).* SIGIR.
 - Moreira, A. & Muir, T. (2017). *Volatility-Managed Portfolios.* Journal of Finance.
+- Avellaneda, M. & Stoikov, S. (2008). *High-Frequency Trading in a Limit Order Book.* Quantitative Finance.
+- Guéant, O., Lehalle, C.-A. & Fernandez-Tapia, J. (2013). *Dealing with the Inventory Risk.* Mathematics and Financial Economics.
+- Cartea, Á., Jaimungal, S. & Penalva, J. (2015). *Algorithmic and High-Frequency Trading.* Cambridge.
+- Schulman, J. et al. (2017). *Proximal Policy Optimization Algorithms.* arXiv:1707.06347.
 
 ## Author
 
