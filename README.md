@@ -11,8 +11,8 @@ through a regime-switching market simulator, deep hedging, ML signal research an
 a reinforcement-learning market-maker, with the validation discipline needed to
 take a model from research into production.
 
-> **Status:** Phase 1 (pricing, vol surface, market simulator) is complete and tested.
-> Later phases are listed in the [roadmap](#roadmap).
+> **Status:** Phase 1 (pricing, vol surface, market simulator) and Phase 2 (deep hedging)
+> are complete and tested. Later phases are listed in the [roadmap](#roadmap).
 
 ---
 
@@ -47,9 +47,68 @@ BF. The gap grows with skew and tenor, which is what you see in live FX markets.
 
 ---
 
+## Phase 2: Deep hedging an FX options book
+
+A PyTorch policy learns to hedge a **short 3M EURUSD ATM call** with daily rebalancing and
+transaction costs, trained end to end through the simulated P&L to minimise **CVaR95**
+(Buehler et al., 2019; Rockafellar-Uryasev objective). It trades two instruments:
+- **FX forwards** (2 bp cost)
+- a **variance swap** (0.2 vol pt half-spread)
+
+The variance swap is priced **exactly** under the regime-switching simulator using a
+linear moment recursion. Its price is therefore a true martingale, so the network
+cannot "learn" fake arbitrage from pricing error.
+
+**Design choices that matter in practice:**
+- **Residual policy:** the network outputs a correction to the Black delta (-vega)
+  hedge. Before training it reproduces the textbook hedge exactly, so it learns only
+  where deviating pays.
+- **Clean evaluation:**
+  - Benchmarks are tuned on training data only; Whalley-Wilmott's risk aversion is
+    picked by grid search on CVaR.
+  - Feature normalisation is fitted on training data only.
+  - Early stopping uses a separate validation market.
+  - All numbers below are from **unseen test paths**.
+- **Regime stress test:** the models are trained on paths that start in the calm regime,
+  then evaluated on a market that **starts in the stress regime**, which they never saw.
+
+![Deep hedging](docs/images/deep_hedging.png)
+
+Selected out-of-sample results (pips per EUR notional; full tables in
+[docs/deep_hedging_results.md](docs/deep_hedging_results.md)):
+
+| Strategy | CVaR95 (calm start) | CVaR99 (calm start) | Txn costs | CVaR95 (stress start) | CVaR99 (stress start) |
+|---|---:|---:|---:|---:|---:|
+| Black delta (live vol) | 254.5 | 298.4 | 6.4 | 477.5 | 547.6 |
+| Whalley-Wilmott band (tuned) | 253.2 | 297.1 | 4.9 | 476.9 | 546.4 |
+| **Deep hedge (fwd)** | **249.9** | **291.1** | 5.1 | 495.3 | 600.4 |
+| Delta-vega (fwd + var swap) | 217.1 | 241.9 | 21.0 | 390.2 | 433.0 |
+| **Deep hedge (fwd + var swap)** | **203.5** | **216.9** | **14.3** | **379.2** | **402.4** |
+
+**What the results show:**
+- **With a vol instrument, the deep hedger beats every benchmark.** Compared with
+  delta-vega, CVaR99 is **10% lower** and transaction costs are **32% lower**.
+  - The premium a CVaR95-constrained desk must charge above fair value falls from
+    67.8 to **54.1 pips (-20%)**. That is the same as quoting a tighter price for the
+    same tail risk.
+  - The advantage holds in the unseen stress regime (CVaR99 402 vs 433).
+- **With forwards only, the gains are small.** Most of the remaining risk is vol risk,
+  which forwards cannot hedge, so the network mainly saves costs. It learned
+  *partial adjustment*: it trades about 91% of each deviation from delta, cutting
+  turnover from 2.96 to 2.35 (right panel).
+- **The forwards-only network does *not* generalise to the stress regime.** It is worse
+  than plain delta hedging there (CVaR99 600 vs 548), because it was trained almost only
+  on calm-regime states. This is exactly the regime-shift failure that production
+  monitoring has to catch. It motivates the drift detection and regime-randomised
+  training planned in Phases 3 and 5.
+
+Reproduce with `python examples/03_deep_hedging.py` (~8 min on a laptop CPU, fixed seeds).
+
+---
+
 ## Validation
 
-There are 91 tests at ~98% line coverage, and they run in CI on Python 3.10, 3.12 and 3.13.
+There are 109 tests at ~97% line coverage, and they run in CI on Python 3.10, 3.12 and 3.13.
 
 - Put-call parity, zero-vol limits, and **every Greek checked against finite differences**
 - Delta to strike round trips for all four delta conventions, calls and puts, 10D and 25D
@@ -58,6 +117,9 @@ There are 91 tests at ~98% line coverage, and they run in CI on Python 3.10, 3.1
 - The risk-neutral density integrates to 1 and its mean equals the forward
 - Heston Fourier price → Garman-Kohlhagen as vol-of-vol → 0; **QE Monte Carlo agrees with the Fourier price within 4 standard errors**
 - Regime occupancy matches the Markov chain's `expm(Q t)`; variance stays non-negative when the Feller condition fails
+- The forward and variance-swap prices are martingales; the variance swap settles exactly on realised variance
+- The cost-free delta hedge replicates the Black-Scholes price, and hedging error shrinks like `1/sqrt(n)` with more frequent rebalancing
+- The untrained residual policy equals Black delta; the **PyTorch loss matches the NumPy P&L engine**; training is deterministic and beats delta hedging out of sample
 
 ---
 
@@ -68,9 +130,11 @@ git clone https://github.com/Nit17/DeltaSigma.git
 cd DeltaSigma
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
+pip install torch --index-url https://download.pytorch.org/whl/cpu   # for deep hedging
 pytest
 python examples/01_vol_surface.py
 python examples/02_regime_simulation.py
+python examples/03_deep_hedging.py
 ```
 
 ```python
@@ -107,9 +171,14 @@ src/deltasigma/
 │   ├── smile.py              # quotes → smile, broker-strangle solve, density / arbitrage checks
 │   ├── surface.py            # term structure, total-variance interpolation, calendar checks
 │   └── sample_market.py      # illustrative EURUSD snapshot
-└── sim/
-    ├── heston.py             # Fourier pricer, QE variance + log-spot steps
-    └── regime.py             # Markov regime-switching Heston simulator
+├── sim/
+│   ├── heston.py             # Fourier pricer, QE variance + log-spot steps
+│   └── regime.py             # Markov regime-switching Heston simulator
+└── hedging/
+    ├── market.py             # hedge instruments, exact regime-aware variance swap
+    ├── pnl.py                # transaction costs, terminal P&L, CVaR metrics
+    ├── strategies.py         # Black delta, delta-vega, Whalley-Wilmott benchmarks
+    └── deep.py               # PyTorch deep hedger (residual policy, CVaR training)
 tests/                        # pytest suite
 examples/                     # runnable scripts that produce the figures above
 ```
@@ -119,10 +188,10 @@ examples/                     # runnable scripts that produce the figures above
 ## Roadmap
 
 - [x] **Phase 1: Pricing and volatility foundations.** FX conventions, SABR / Vanna-Volga smiles, broker-strangle calibration, arbitrage checks, regime-switching Heston simulator.
-- [ ] **Phase 2: Deep hedging.** A PyTorch hedging policy for an FX options book with transaction costs and risk-measure objectives (CVaR), benchmarked against BS delta and delta-vega hedging across calm and stress regimes.
+- [x] **Phase 2: Deep hedging.** A PyTorch CVaR hedging policy with transaction costs, benchmarked against Black delta, Whalley-Wilmott and delta-vega hedging in calm and stress regimes.
 - [ ] **Phase 3: Vol signal research.** Forecasting the vol surface and the realised-vs-implied vol premium (HAR-RV, gradient boosting, sequence models) with walk-forward evaluation, purged / embargoed CV, leakage checks and regime detection.
 - [ ] **Phase 4: RL market-making.** An FX options RFQ simulator with client flow and a win-probability model; a PPO quoting agent with Greek inventory limits, compared against an Avellaneda-Stoikov-style baseline.
-- [ ] **Phase 5: Production.** Greek-based PnL attribution, model drift monitoring, a backtest report and a pricing / quoting service.
+- [ ] **Phase 5: Production.** Greek-based PnL attribution, model drift monitoring (catching failures like the forwards-only hedger's stress-regime breakdown), regime-randomised retraining, a backtest report and a pricing / quoting service.
 
 ## Data
 
@@ -140,6 +209,8 @@ illustrative and are not live market data.
 - Andersen, L. (2008). *Simple and Efficient Simulation of the Heston Stochastic Volatility Model.*
 - Albrecher, H. et al. (2007). *The Little Heston Trap.*
 - Buehler, H. et al. (2019). *Deep Hedging.* Quantitative Finance.
+- Whalley, A. E. & Wilmott, P. (1997). *An Asymptotic Analysis of an Optimal Hedging Model for Option Pricing with Transaction Costs.* Mathematical Finance.
+- Rockafellar, R. T. & Uryasev, S. (2000). *Optimization of Conditional Value-at-Risk.* Journal of Risk.
 
 ## Author
 
