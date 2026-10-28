@@ -11,8 +11,9 @@ through a regime-switching market simulator, deep hedging, ML signal research an
 a reinforcement-learning market-maker, with the validation discipline needed to
 take a model from research into production.
 
-> **Status:** Phases 1–4 (pricing and vol surface, deep hedging, vol signal research on
-> real EURUSD data, RL market-making) are complete and tested. Later phases are listed in the [roadmap](#roadmap).
+> **Status:** all five phases are complete and tested: pricing and vol surface, deep hedging,
+> vol signal research on real EURUSD data, RL market-making, and production tooling
+> (P&L explain, drift monitoring, gated deployment, API service). See the [roadmap](#roadmap) for what comes next.
 
 ---
 
@@ -253,9 +254,86 @@ Reproduce with `python examples/05_rl_market_making.py` (~10 min on a laptop CPU
 
 ---
 
+## Phase 5: Production: P&L explain, monitoring, gated deployment, API
+
+Phase 5 is the part of the job that starts after the backtest. Full output is in
+[docs/production_results.md](docs/production_results.md); reproduce with
+`python examples/06_production.py`.
+
+![Production](docs/images/production.png)
+
+**A. Greek P&L explain** ([`production/attribution.py`](src/deltasigma/production/attribution.py))
+- **What it does:** splits a four-option EURUSD book's daily full-revaluation P&L into
+  delta, gamma, vega, vanna, volga, theta and rho terms, plus an unexplained residual.
+- **Accuracy:** the explain covers **99.99%** of daily P&L variance. Tests confirm the
+  residual is third order for spot and vol moves, and second order once time or rates
+  move (charm and rate cross terms).
+- **Materiality limit:** unexplained P&L above 2% of the typical daily P&L (55 USD)
+  triggers a breach. That happened on 10 of 189 days, and the residual tracks
+  **large implied-vol moves** (correlation 0.65 with |Δvol| vs 0.06 with |Δspot|).
+  - That points to ultima and vol-time cross terms the explain leaves out, the kind of
+    finding a desk would hand to the model-validation team.
+
+**B. Drift monitoring on the real EURUSD vol forecaster** ([`production/monitoring.py`](src/deltasigma/production/monitoring.py))
+- **Setup:**
+  - The Phase 3 HAR-RV-IV forecasts are monitored on **matured** losses: a 21-day
+    forecast can only be scored 21 days later, so the monitor never uses future data.
+  - Each degradation episode raises one alert (63-day cooldown).
+
+| Monitor | Alerts (2012–2025) | Verdict |
+|---|---|---|
+| **Page-Hinkley** on QLIKE | **2: 2020-03-12 (COVID), 2022-03-15 (Ukraine / rates shock)** | Catches exactly the two structural breaks |
+| CUSUM vs a fixed 2012 reference | 26 episodes | Too sensitive: losses are heavy-tailed and autocorrelated, and the reference period was unusually calm |
+| PSI > 0.25 on features | 451 of 453 window checks | Unusable on persistent *level* features: PSI assumes i.i.d. samples |
+| Out-of-range rate (> 10% of a window outside everything seen in training) | 55 of 453 | Actionable: flags when the model runs outside its training domain (e.g. the 2012–14 fall to vol levels below anything in the 2008–11 training data) |
+
+  Choosing and calibrating monitors is part of the model, too.
+
+**C. Regime-gated deployment of the RL quoter** ([`production/gating.py`](src/deltasigma/production/gating.py))
+- **The problem:** Phase 4's PPO quoter helped in stress but failed the deployment gate
+  in calm markets.
+- **The fix:** an online two-state HMM on observed vol changes routes each RFQ to PPO
+  only when P(stress) > 0.5. That threshold was fixed in advance.
+- **Results:** on the same 4,000 paired test days as Phase 4:
+
+| Policy | Normal days | Stress-start days | RFQs routed to PPO |
+|---|---:|---:|---:|
+| B4 classical | 20.76 | 13.17 | 0% |
+| PPO always | 20.59 (t = −2.7) | 14.74 (t = +19) | 100% |
+| **HMM-gated (B4 calm / PPO stress)** | **21.27 (t = +12)** | **14.69 (t = +22)** | 11% / 32% |
+
+- **Interpretation:** the gated policy is **better than either component on normal days**.
+  Normal days also have stress spells, and the gate catches them, while keeping
+  almost all of PPO's stress-day gain.
+- **Model registry:** trained models are versioned in a file registry
+  ([`production/registry.py`](src/deltasigma/production/registry.py)). Each entry
+  records its config hash, git commit and metrics. Re-running reloads the identical
+  models, which reproduce Phase 4's numbers exactly.
+
+**D. Pricing and quoting API** ([`service/app.py`](src/deltasigma/service/app.py))
+- **Framework and endpoints:** FastAPI with typed, validated requests.
+  - `POST /price`: smile-consistent price and Greeks for a strike or a delta (any
+    supported pair, including premium-adjusted).
+  - `POST /quote`: an RFQ quote with edge, quoted vol, win probability and expected P&L.
+  - `GET /health` and `GET /model-info`.
+- **Latency:** server-side processing on a laptop:
+  - about **5 ms p50 per quote**;
+  - about **8 ms per price** once the smile for a market snapshot is cached;
+  - about 60–100 ms for the first price after a market update, because of smile calibration.
+- **Packaging:** the Dockerfile runs as a non-root user with a health check; CI builds
+  the image and smoke-tests the container over HTTP.
+
+```bash
+uvicorn deltasigma.service.app:app --port 8000            # or: docker build -t deltasigma . && docker run -p 8000:8000 deltasigma
+curl -X POST localhost:8000/price -H "Content-Type: application/json" \
+  -d '{"spot":1.085,"rd":0.043,"rf":0.025,"tenor_years":0.25,"atm":0.072,"rr25":-0.0042,"bf25":0.002,"delta":0.25}'
+```
+
+---
+
 ## Validation
 
-There are 143 tests at ~97% line coverage, and they run in CI on Python 3.10, 3.12 and 3.13.
+There are 172 tests at ~97% line coverage, and they run in CI on Python 3.10, 3.12 and 3.13, plus a Docker build-and-smoke-test job.
 
 - Put-call parity, zero-vol limits, and **every Greek checked against finite differences**
 - Delta to strike round trips for all four delta conventions, calls and puts, 10D and 25D
@@ -273,6 +351,9 @@ There are 143 tests at ~97% line coverage, and they run in CI on Python 3.10, 3.
 - On synthetic data where implied vol is the true expected vol, HAR-RV-IV beats HAR-RV with a significant DM statistic; QLIKE is minimised at the truth
 - The RFQ simulator's P&L identity holds exactly (spread + MTM − hedge costs), books are flat at the close, fill frequencies match the true win probability, and informed clients always trade in the direction of the future vol move
 - The win model is calibrated to ground truth; the grid-optimal quote satisfies the profit trade-off; inventory skew moves quotes in the right direction; the PPO residual starts exactly at its base quoter
+- The P&L explain residual has the theoretically correct order (third for spot/vol, second with time or rates); book Greeks match finite differences
+- CUSUM stays quiet in control and detects a 1.5σ shift within 15 observations; Page-Hinkley, PSI, KS, out-of-range and cooldown behave as specified; the online HMM filter matches the batch filter exactly
+- The registry round-trips models and finds cached versions by config hash; the API returns strikes whose delta matches the request under the pair's convention, satisfies put-call parity, and rejects invalid requests with HTTP 422
 
 ---
 
@@ -290,6 +371,8 @@ python examples/02_regime_simulation.py
 python examples/03_deep_hedging.py
 python examples/04_vol_research.py
 python examples/05_rl_market_making.py
+python examples/06_production.py
+pip install -e ".[service]" && uvicorn deltasigma.service.app:app --port 8000
 ```
 
 ```python
@@ -348,6 +431,13 @@ src/deltasigma/
     ├── winprob.py            # win-probability model, calibration, markout estimation
     ├── policies.py           # fixed / model-optimal / AS-skew quoters, tuning, evaluation
     └── ppo.py                # PPO residual market-maker (PyTorch, from scratch)
+├── production/
+│   ├── attribution.py        # Greek P&L explain with unexplained residual
+│   ├── monitoring.py         # PSI, KS, out-of-range, CUSUM, Page-Hinkley, alerting
+│   ├── gating.py             # online HMM filter, regime-gated policy deployment
+│   └── registry.py           # versioned model registry with config hash + git commit
+└── service/
+    └── app.py                # FastAPI pricing & RFQ quoting service (Dockerfile at repo root)
 tests/                        # pytest suite
 examples/                     # runnable scripts that produce the figures above
 ```
@@ -360,7 +450,13 @@ examples/                     # runnable scripts that produce the figures above
 - [x] **Phase 2: Deep hedging.** A PyTorch CVaR hedging policy with transaction costs, benchmarked against Black delta, Whalley-Wilmott and delta-vega hedging in calm and stress regimes.
 - [x] **Phase 3: Vol signal research.** Real EURUSD realised-vol forecasting (HAR-RV, HAR-RV-IV, gradient boosting, GRU) with leakage audits, purged walk-forward and nested CV, HMM regime detection, Diebold-Mariano tests and a VRP backtest.
 - [x] **Phase 4: RL market-making.** An FX options RFQ simulator with informed client flow; a calibrated win-probability model; tuned Avellaneda-Stoikov-style quoters; a PPO residual agent with a validation deployment gate.
-- [ ] **Phase 5: Production.** Greek-based PnL attribution, model drift monitoring (catching failures like the forwards-only hedger's stress-regime breakdown), regime-conditional policy switching (HMM-gated RL quoter), regime-randomised retraining, a backtest report and a pricing / quoting service.
+- [x] **Phase 5: Production.** Greek P&L explain, drift monitoring on real forecasts (Page-Hinkley, CUSUM, PSI, out-of-range), HMM-gated deployment of the RL quoter, a versioned model registry, and a FastAPI pricing / quoting service with Docker and CI.
+
+**Next ideas**
+- Retrain the Phase 2 deep hedger on randomised regimes, so it doesn't fail the way the forwards-only network did in stress.
+- Add an automatic fallback to classical hedging when a monitor raises an alert.
+- Calibrate SVI or rough-vol surfaces to real FX option quotes.
+- Train on a GPU (JAX / CUDA) with a much larger simulation budget.
 
 ## Data
 
@@ -398,6 +494,7 @@ examples/                     # runnable scripts that produce the figures above
 - Guéant, O., Lehalle, C.-A. & Fernandez-Tapia, J. (2013). *Dealing with the Inventory Risk.* Mathematics and Financial Economics.
 - Cartea, Á., Jaimungal, S. & Penalva, J. (2015). *Algorithmic and High-Frequency Trading.* Cambridge.
 - Schulman, J. et al. (2017). *Proximal Policy Optimization Algorithms.* arXiv:1707.06347.
+- Page, E. S. (1954). *Continuous Inspection Schemes.* Biometrika (CUSUM); Hinkley, D. (1971). *Inference about the change-point from cumulative sum tests.* Biometrika.
 
 ## Author
 
