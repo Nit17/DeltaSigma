@@ -56,14 +56,24 @@ class ModelQuoter:
     flow_coef: float = 0.0
     markout_scale: float = 1.0
 
+    def unit_cost(self, tier, side, size, inventory, flow_tier1) -> np.ndarray:
+        """Per-vega-unit cost (adverse selection + inventory) of filling an RFQ."""
+        tier = np.asarray(tier, dtype=int)
+        adverse = np.asarray(self.markout)[tier] + self.flow_coef * np.asarray(side) * flow_tier1
+        return self.markout_scale * adverse + self.inventory_aversion * (
+            0.5 * np.asarray(size) - np.asarray(side) * np.asarray(inventory)
+        )
+
+    def quote_state(self, tier, side, size, inventory, vol_level, vol_of_vol, flow_tier1):
+        """Quote from explicit (normalised) state; shared by the simulator and the API."""
+        cost = self.unit_cost(tier, side, size, inventory, flow_tier1)
+        return self.win_model.optimal_edge(tier, vol_level, vol_of_vol, cost)
+
     def quote(self, env: RFQMarket) -> np.ndarray:
         rfq = env.current_rfq()
         obs = env.observe()
-        adverse = np.asarray(self.markout)[rfq["tier"]] + self.flow_coef * rfq["side"] * env.flow1
-        cost = self.markout_scale * adverse + self.inventory_aversion * (
-            0.5 * rfq["size"] - rfq["side"] * env.q
-        )
-        return self.win_model.optimal_edge(rfq["tier"], obs[:, 1], obs[:, 2], cost)
+        return self.quote_state(rfq["tier"], rfq["side"], rfq["size"], env.q, obs[:, 1],
+                                obs[:, 2], env.flow1)
 
     def __call__(self, env: RFQMarket) -> tuple[np.ndarray, np.ndarray]:
         return self.quote(env), band_hedge(env.q, self.band)

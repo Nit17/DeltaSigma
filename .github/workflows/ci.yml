@@ -34,3 +34,23 @@ jobs:
           python examples/03_deep_hedging.py --quick
           python examples/04_vol_research.py --synthetic --quick
           python examples/05_rl_market_making.py --quick
+          python examples/06_production.py --quick
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t deltasigma:ci .
+      - name: Run and smoke-test the service
+        run: |
+          docker run -d --name ds -p 8000:8000 deltasigma:ci
+          for i in $(seq 1 60); do curl -sf localhost:8000/health && break || sleep 2; done
+          curl -sf localhost:8000/health
+          curl -sf -X POST localhost:8000/price -H 'Content-Type: application/json' \
+            -d '{"spot":1.085,"rd":0.043,"rf":0.025,"tenor_years":0.25,"atm":0.072,"rr25":-0.0042,"bf25":0.002,"delta":0.25}'
+          curl -sf -X POST localhost:8000/quote -H 'Content-Type: application/json' \
+            -d '{"tier":1,"side":1,"size":3,"inventory":-5,"mid_vol":7.5}'
+      - name: Container logs
+        if: always()
+        run: docker logs ds
